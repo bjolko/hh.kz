@@ -1,0 +1,185 @@
+---
+title: "Data Science on HH.kz"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+
+library(data.table)
+library(dplyr)
+library(tm)
+library(SnowballC)
+library(stringr)
+library(jsonlite)
+library(rvest)
+library(lucr)
+library(wordcloud)
+library(RColorBrewer)
+library(rvest)
+library(ggplot2)
+library(knitr)
+library(plotly)
+
+options(scipen = 100, digits = 2)
+```
+
+
+```{r scrapping, cache=TRUE}
+numextract <- function(string){ 
+  str_extract(string, "\\-*\\d+\\.*\\d*")
+} 
+
+clean_text <- function(x){
+  swords <- c("в", "без", "до", "из", "к", "на", "по", "о", "от", "перед", "при", "через", "за", "над", "об", "под", "про", "для", "вблизи", "вглубь", "вдоль", "возле", "около", "вокруг", "впереди", "после", "посредством", "в роли", "в зависимости от", "путём", "насчёт", "по поводу", "ввиду", "по случаю", "в течение", "благодаря", "несмотря на", "спустя", "с ", "из-под", "из-за", "по-над", "в отличие от", "в связи", "как", "словно", "так как", "для того чтобы", "тоже", "зато", "чтобы", "также", "потому что", "и ", "а ", "что", "или", "но", "однако", "когда", "лишь", "едва", "где", "куда", "откуда", "столько", "настолько", "так", "до такой степени", "до того", "такой", "как будто", "будто", "точно", "как бы","если", "если бы", "коли", "ежели", "несмотря на то", "хотя", "хоть", "пускай", "дабы", "с тем чтобы", "так что", "ли", "не", "какой")
+  stem_text <- function(x) {
+    res <- system("C:/Users/ellys/Documents/mystem -cl", intern = TRUE, input = x)
+    res <- gsub("[{}]", "", res)
+    res <- gsub("(\\|[^ ]+)", "", res)
+    res <- gsub("\\?", "", res)
+    res <- gsub("\\s+", " ", res)
+    res
+  }
+  tolower(x) %>% enc2utf8() %>% gsub('-', ' ', .) %>% 
+    removePunctuation() %>% 
+    removeWords(c(stopwords("english"), stopwords("ru"), swords, '<>', '</>',
+                  'highlighttext')) %>% 
+    stem_text()
+}
+
+corpus <- function(x){
+  VCorpus(VectorSource(x)) %>% tm_map(PlainTextDocument) %>% 
+    TermDocumentMatrix(.) %>% 
+    removeSparseTerms(0.99) %>% as.matrix(.) %>% as.data.frame(.)
+}
+
+####Data Scrapping from HH
+#Ваш API key на https://openexchangerates.org/ (библиотека lucr)
+key <- 'key'
+
+#Таблица скурсами валют для перевода зарплат в инвалютах в тенге
+rate <- data.frame(Currency = c('USD', 'EUR', 'RUB', 'KZT'),
+                   Value = c(currency_convert(1, from = "USD", to = 'KZT', key),
+                             currency_convert(1, from = "EUR", to = 'KZT', key),
+                             currency_convert(1, from = "RUB", to = 'KZT', key),
+                             1))
+
+#Заготовка для таблицы с вакансиями
+vacanciesdf <- data.frame(
+  City = character(),  
+  Currency = character(), 
+  Salary = character(), 
+  Company = character(), 
+  Requerement = character(), 
+  Responsibility = character(),
+  Position = character(),
+  stringsAsFactors = T) 
+
+for (pageNum in 0:25) { # Всего страниц
+#area=40 - код Казахстана
+  data <- fromJSON(paste0("https://api.hh.ru/vacancies?text=%D0%B0%D0%BD%D0%B0%D0%BB%D0%B8%D1%82%D0%B8%D0%BA&area=40&page=", pageNum))
+  vacanciesdf <- rbind(vacanciesdf, data.frame(
+    City = data$items$area$name, # Город
+    Currency = data$items$salary$currency, # Валюта
+    Salary = data$items$salary$to, # Максимальная оплата
+    Company = data$items$employer$name, # Название компании
+    Requerement = data$items$snippet$requirement, # Требуемые навыки
+    Responsibility = data$items$snippet$responsibility, # Обязанности
+    Position = data$items$name, # Должность
+    stringsAsFactors = T))
+  Sys.sleep(3)
+}
+
+data <- mutate_if(vacanciesdf, is.factor, funs(as.character(.))) %>% 
+  merge(rate, all.x = T) %>% 
+  mutate(CSalary = Value*Salary, 
+  is_cur = ifelse(!is.na(Currency) & Currency %in% c('USD', 'EUR', 'RUB'), 1, 0)) %>% 
+  filter(grepl('аналитик|анализ|business int|analyst|data|machine l', tolower(Position))) %>%
+  filter(!grepl('финансовый|химик|кредитный|инвестицион|налоговый|системный', tolower(Position))) %>%
+  mutate_at(c('Requerement', 'Responsibility'), funs(gsub('highlighttext', '', .))) %>%
+  mutate(x = str_locate(clean_text(gsub('-х|-го', '', Requerement)), 'год')[,1]-2,
+         z = gsub('три', '3', str_sub(clean_text(gsub('-х|-го', '', Requerement)), x-8, x)),
+         Experience = as.numeric(ifelse(!is.na(z) & is.na(numextract(z)), '1',
+                      ifelse(!is.na(z) & !is.na(numextract(z)), numextract(z), NA)))) %>% 
+  select(-x, -z)
+```
+
+Итого рассморено `r nrow(data)` вакансий в `r length(unique(data$City))` городах Казахстана.
+
+```{r cities}
+
+cities <- data %>% mutate(City = ifelse(!City %in% c('Астана', 'Алматы'), 
+                                        'Другие', City)) %>% count(City) %>% 
+          mutate(pct = n/sum(n))
+
+ggplot(cities, aes(x = City, y = n, fill = City))+
+  geom_bar(stat = 'identity', color = 'black')+
+  scale_fill_manual(values = c("royalblue", "blue", "navy"),
+                      guide = F)+
+  xlab('')+
+  ylab('')+
+  geom_text(aes(label = paste0(round(pct*100), '%')), 
+            size = 5, fontface="bold", color = 'white',
+            position = position_stack(vjust = 0.55))+
+  geom_text(aes(label = paste0(n, ' вакансий')), 
+            size = c(4, 4, 3), fontface="bold", color = 'lightblue',
+            position = position_stack(vjust = 0.4))+
+  theme(axis.text.x = element_text(face="bold", color = 'black', size = 12),
+        axis.ticks.y=element_blank())
+```
+
+Зарплата указана в `r nrow(data %>% filter(!is.na(CSalary)))` вакансиях из `r nrow(data)`. Средняя зарплата  - `r round(median(data$CSalary/1000, na.rm = T))` тыс. тенге. При этом `r nrow(data %>% filter(CSalary < 200000))` вакансий предлагают зарплату менее 200К тенге.
+
+Средний требуемый опыт работы - `r median(data$Experience, na.rm = T)` года.
+
+```{r text, cache = TRUE}
+vactxt <- 
+  lapply(list(data$Requerement, data$Responsibility),
+         function(x) sapply(x, function(y) clean_text(y))) %>% 
+  lapply(., corpus) %>% 
+  lapply(., function(x) setNames(x, as.character(1:ncol(x)))) %>% 
+  setNames(c('Req', 'Resp')) %>% 
+  lapply(., function(x) setDT(x, keep.rownames = T) %>% 
+           mutate(total = rowSums(.[,-1] > 0), pct = round(total/(ncol(.)-1), 2)) %>% 
+           select(rn, total, pct))  
+```
+
+###Обязанности
+```{r responsibility}
+responsibility <- vactxt[[2]] %>% arrange(-pct) %>% 
+          filter(!rn %in% c('опыт', 'мало', 'аналитик', 'область', 'работа', 'анализ'))
+
+wordcloud(responsibility$rn, responsibility$total, random.order = F, 
+          colors = brewer.pal(9, "Blues")[5:9], min.freq = 3)
+```
+
+###Требуемые навыки
+```{r requerement}
+requerement <- vactxt[[1]] %>% arrange(-pct) %>% 
+          filter(!rn %in% c('опыт', 'мало', 'аналитик', 'область', 'работа'))
+
+wordcloud(requerement$rn, requerement$total, random.order = F, 
+          colors = brewer.pal(9, "Blues")[5:9])
+
+t <- select(data, Requerement) %>% 
+  mutate(Requerement = tolower(Requerement),
+  R = ifelse(grepl(' r | r,', Requerement), 1, 0),
+  SQL = ifelse(grepl('sql', Requerement), 1, 0),
+  python = ifelse(grepl('python', Requerement), 1, 0),
+  MSExcel = ifelse(grepl('excel', Requerement), 1, 0),
+  PowerPoint = ifelse(grepl('power p', Requerement), 1, 0),
+  SAS = ifelse(grepl('sas', Requerement), 1, 0),
+  SPSS = ifelse(grepl('spss', Requerement), 1, 0),
+  English = ifelse(grepl('english|английск', Requerement), 1, 0))
+
+colSums(t[, -1])
+
+```
+
+###График по наименованию позиций
+
+```{r positions}
+count(data, Position) %>% arrange(-n) %>% head()
+```
+
