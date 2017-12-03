@@ -58,7 +58,7 @@ corpus <- function(x){
 #Ваш API key на https://openexchangerates.org/ (библиотека lucr)
 key <- 'key'
 
-#Таблица скурсами валют для перевода зарплат в инвалютах в тенге
+#Таблица с курсами валют для перевода зарплат в инвалютах в тенге
 rate <- data.frame(Currency = c('USD', 'EUR', 'RUB', 'KZT'),
                    Value = c(currency_convert(1, from = "USD", to = 'KZT', key),
                              currency_convert(1, from = "EUR", to = 'KZT', key),
